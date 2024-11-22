@@ -1,0 +1,4 @@
+.pio
+.vscode
+src/config.yaml
+include/config.h
