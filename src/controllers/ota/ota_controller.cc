@@ -13,12 +13,7 @@ OTAController::OTAController(const OTAControllerParams& params) {
 void OTAController::setup() {
 	ArduinoOTA.setHostname(params_.hostname);
 	ArduinoOTA.setPort(params_.port);
-	ArduinoOTA.onStart([]() {
-		otaLog.print("Starting update...");
-	});
-	ArduinoOTA.onEnd([]() {
-		otaLog.print("Done!");
-	});
+    ArduinoOTA.setMdnsEnabled(false);
 #ifdef IO_DEBUG
 	ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
 		otaLog.build()

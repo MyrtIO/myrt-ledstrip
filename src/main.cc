@@ -14,9 +14,9 @@ void setup() {
 		.registerPlatform(IO_INJECT_UNIT(IWiFiPlatform))
 		.registerPlatform(IO_INJECT_UNIT(ILightPlatform))
 		// Add controllers
+		.registerController(IO_INJECT_UNIT(OTAController))
 		.registerController(IO_INJECT_UNIT(BootController))
-		.registerController(IO_INJECT_UNIT(MQTTController))
-		.registerController(IO_INJECT_UNIT(OTAController));
+		.registerController(IO_INJECT_UNIT(MQTTController));
 
 	strip.log().print("initialized");
 }
