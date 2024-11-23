@@ -6,6 +6,7 @@
 # Modified since 2015-09-18 from Pascal Gollor (https://github.com/pgollor)
 # Modified since 2015-11-09 from Hristo Gochkov (https://github.com/me-no-dev)
 # Modified since 2016-01-03 from Matthew O'Gorman (https://githumb.com/mogorman)
+# Modified since 2024-10-23 from Mikhael Khrustik (https://github.com/mishamyrt)
 #
 # This script will push an OTA update to the ESP
 # use it like: python3 espota.py -i <ESP_IP_address> -I <Host_IP_address> -p <ESP_port> -P <Host_port> [-a password] -f <sketch.bin>
@@ -27,322 +28,371 @@
 # 2016-01-03:
 # - Added more options to parser.
 #
+# Changes
+# 2024-10-23:
+# - Added progress bar
+# - Improved UX
+# - Updated to Python 3
 
-from __future__ import print_function
+from __future__ import print_function, annotations
 import socket
 import sys
 import os
-import optparse
+import secrets
+import asyncio
+import hashlib
+from typing import Callable
+from enum import Enum
+import argparse
 import logging
 import hashlib
 import random
+import time
 
 # Commands
-FLASH = 0
-SPIFFS = 100
-AUTH = 200
-PROGRESS = False
-# update_progress() : Displays or updates a console progress bar
-## Accepts a float between 0 and 1. Any int will be converted to a float.
-## A value under 0 represents a 'halt'.
-## A value at 1 or bigger represents 100%
-def update_progress(progress):
-  if (PROGRESS):
-    barLength = 60 # Modify this to change the length of the progress bar
-    status = ""
-    if isinstance(progress, int):
-      progress = float(progress)
-    if not isinstance(progress, float):
-      progress = 0
-      status = "error: progress var must be float\r\n"
-    if progress < 0:
-      progress = 0
-      status = "Halt...\r\n"
-    if progress >= 1:
-      progress = 1
-      status = "Done...\r\n"
-    block = int(round(barLength*progress))
-    text = "\rUploading: [{0}] {1}% {2}".format( "="*block + " "*(barLength-block), int(progress*100), status)
-    sys.stderr.write(text)
-    sys.stderr.flush()
-  else:
-    sys.stderr.write('.')
-    sys.stderr.flush()
+COMMAND_FLASH = 0
+COMMAND_SPIFFS = 100
+COMMAND_AUTH = 200
 
-def serve(remoteAddr, localAddr, remotePort, localPort, password, filename, command = FLASH):
-  # Create a TCP/IP socket
-  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  server_address = (localAddr, localPort)
-  logging.info('Starting on %s:%s', str(server_address[0]), str(server_address[1]))
-  try:
-    sock.bind(server_address)
-    sock.listen(1)
-  except Exception:
-    logging.error("Listen Failed")
-    return 1
+PACKET_SIZE = 512
 
-  # Check whether Signed Update is used.
-  if ( os.path.isfile(filename + '.signed') ):
-    filename = filename + '.signed'
-    file_check_msg = 'Detected Signed Update. %s will be uploaded instead.' % (filename)
-    sys.stderr.write(file_check_msg + '\n')
-    sys.stderr.flush()
-    logging.info(file_check_msg)
+Address = tuple[str, int]
 
-  content_size = os.path.getsize(filename)
-  f = open(filename,'rb')
-  file_md5 = hashlib.md5(f.read()).hexdigest()
-  f.close()
-  logging.info('Upload size: %d', content_size)
-  message = '%d %d %d %s\n' % (command, localPort, content_size, file_md5)
+class Progress:
+    """Progress bar printer"""
+    _value: float
+    _title: str
+    _bar_width: int
+    _fill_char: str
+    _empty_char: str
 
-  # Wait for a connection
-  logging.info('Sending invitation to: %s', remoteAddr)
-  sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  remote_address = (remoteAddr, int(remotePort))
-  sock2.sendto(message.encode(), remote_address)
-  sock2.settimeout(4)
-  try:
-    data = sock2.recv(128).decode()
-  except Exception:
-    logging.error('No Answer')
-    sock2.close()
-    return 1
-  if (data != "OK"):
-    if(data.startswith('AUTH')):
-      nonce = data.split()[1]
-      cnonce_text = '%s%u%s%s' % (filename, content_size, file_md5, remoteAddr)
-      cnonce = hashlib.md5(cnonce_text.encode()).hexdigest()
-      passmd5 = hashlib.md5(password.encode()).hexdigest()
-      result_text = '%s:%s:%s' % (passmd5 ,nonce, cnonce)
-      result = hashlib.md5(result_text.encode()).hexdigest()
-      sys.stderr.write('Authenticating...')
-      sys.stderr.flush()
-      message = '%d %s %s\n' % (AUTH, cnonce, result)
-      sock2.sendto(message.encode(), remote_address)
-      sock2.settimeout(10)
-      try:
-        data = sock2.recv(32).decode()
-      except Exception:
-        sys.stderr.write('FAIL\n')
-        logging.error('No Answer to our Authentication')
-        sock2.close()
-        return 1
-      if (data != "OK"):
-        sys.stderr.write('FAIL\n')
-        logging.error('%s', data)
-        sock2.close()
-        sys.exit(1)
-        return 1
-      sys.stderr.write('OK\n')
-    else:
-      logging.error('Bad Answer: %s', data)
-      sock2.close()
-      return 1
-  sock2.close()
+    def __init__(self,
+                operation: str,
+                fill_char: str = "█",
+                empty_char: str = "░",
+                bar_width: int = 60):
+        self._title = operation
+        self._fill_char = fill_char
+        self._empty_char = empty_char
+        self._bar_width = bar_width
 
-  logging.info('Waiting for device...')
-  try:
-    sock.settimeout(10)
-    connection, client_address = sock.accept()
-    sock.settimeout(None)
-    connection.settimeout(None)
-  except Exception:
-    logging.error('No response from device')
-    sock.close()
-    return 1
+    def start(self):
+        """Starts the progress bar"""
+        self.update(0)
 
-  received_ok = False
+    def update(self, value: float):
+        """Updates the progress bar value"""
+        self._value = value
+        self._print_progress(self._value)
 
-  try:
-    f = open(filename, "rb")
-    if (PROGRESS):
-      update_progress(0)
-    else:
-      sys.stderr.write('Uploading')
-      sys.stderr.flush()
-    offset = 0
-    while True:
-      chunk = f.read(1460)
-      if not chunk: break
-      offset += len(chunk)
-      update_progress(offset/float(content_size))
-      connection.settimeout(10)
-      try:
-        connection.sendall(chunk)
-        if connection.recv(32).decode().find('O') >= 0:
-          # connection will receive only digits or 'OK'
-          received_ok = True
-      except Exception:
-        sys.stderr.write('\n')
-        logging.error('Error Uploading')
-        connection.close()
-        f.close()
-        sock.close()
-        return 1
+    def finish(self, message: str):
+        """Finishes the progress bar, prints the final message"""
+        self._print_progress(1)
+        padding = os.get_terminal_size().columns - len(message) - 1
+        message = f"{message}{' ' * padding}"
+        print(message)
 
-    sys.stderr.write('\n')
-    logging.info('Waiting for result...')
-    # libraries/ArduinoOTA/ArduinoOTA.cpp L311 L320
-    # only sends digits or 'OK'. We must not not close
-    # the connection before receiving the 'O' of 'OK'
+    def _print_progress(self, value: float):
+        if value < 0:
+            value = 0
+        if value >= 1:
+            value = 1
+        fill_width = int(round(self._bar_width * value))
+        padding_width = self._bar_width - fill_width
+
+        progress_bar = f"{self._fill_char * fill_width}{self._empty_char * padding_width}"
+        print(f"{self._title}: {progress_bar} {value*100:.1f}%", end="\r", flush=True)
+
+class ImageType(Enum):
+    """Supported image types"""
+    FLASH = COMMAND_FLASH
+    SPIFFS = COMMAND_SPIFFS
+
+class ImageFile:
+    """Splits file into chunks"""
+    _file: bytes
+    _chunk_size: int
+    _offset: int
+    _md5: str
+    _type: ImageType
+
+    def __init__(self, image_type: ImageType, file: bytes, chunk_size: int = PACKET_SIZE):
+        self._file = file
+        self._chunk_size = chunk_size
+        self._type = image_type
+        self._offset = 0
+        self._md5 = hashlib.md5(file).hexdigest()
+
+    @property
+    def end_of_file(self) -> bool:
+        """Returns true if end of file reached"""
+        return self._offset >= self.size
+
+    @property
+    def offset(self) -> int:
+        """Returns current offset"""
+        return self._offset
+
+    @property
+    def size(self) -> int:
+        """Returns file size"""
+        return len(self._file)
+
+    @property
+    def md5(self) -> str:
+        """Returns file md5"""
+        return self._md5
+
+    @property
+    def type(self) -> ImageType:
+        """Returns image type"""
+        return self._type
+
+    def next_chunk(self) -> bytes:
+        """Retrieves next chunk"""
+        chunk_end = 0
+        if self._offset + self._chunk_size <= len(self._file):
+            chunk_end = self._offset + self._chunk_size
+        elif self._offset < len(self._file):
+            chunk_end = len(self._file)
+        else:
+            raise ValueError("end of file reached")
+        chunk = self._file[self._offset:chunk_end]
+        self._offset += len(chunk)
+        return chunk
+
+class OTAError(Exception):
+    """Returns when there is a problem during the OTA process"""
+
+def _to_md5(message: str) -> str:
+    return hashlib.md5(message.encode()).hexdigest()
+
+def _calculate_auth_challenge(password: str, nonce: str) -> tuple[str, str]:
+    cnonce = _to_md5(secrets.token_hex(32))
+    challenge = _to_md5(f"{_to_md5(password)}:{nonce}:{cnonce}")
+    return (challenge, cnonce)
+
+def _format_invitation(image: ImageFile, port: int) -> str:
+    return f"{image.type.value} {port} {image.size} {image.md5}\n"
+
+def _format_authentication(password: str, nonce: str) -> str:
+    challenge, cnonce = _calculate_auth_challenge(password, nonce)
+    return f"{COMMAND_AUTH} {challenge} {cnonce}\n"
+
+def _try_invite(
+        remote: Address,
+        local_port: int,
+        file: ImageFile,
+        password: str = None) -> None:
+    """Invite ArduinoOTA client"""
+    invitation = _format_invitation(file, local_port)
+    stream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stream.sendto(invitation.encode(), remote)
+    stream.settimeout(1.5)
     try:
-      connection.settimeout(60)
-      received_ok = False
-      received_error = False
-      while not (received_ok or received_error):
-        reply = connection.recv(64).decode()
-        # Look for either the "E" in ERROR or the "O" in OK response
-        # Check for "E" first, since both strings contain "O"
-        if reply.find('E') >= 0:
-          sys.stderr.write('\n')
-          logging.error('%s', reply)
-          received_error = True
-        elif reply.find('O') >= 0:
-          logging.info('Result: OK')
-          received_ok = True
-      connection.close()
-      f.close()
-      sock.close()
-      if received_ok:
-        return 0
-      return 1
-    except Exception:
-      logging.error('No Result!')
-      connection.close()
-      f.close()
-      sock.close()
-      return 1
+        data = stream.recv(128).decode()
+    except socket.timeout as exc:
+        stream.close()
+        raise OTAError('invitation timeout') from exc
+    if data.find("OK") >= 0:
+        stream.close()
+        return
+    # Authentication
+    if data.startswith('AUTH'):
+        if password is None:
+            raise OTAError('no password provided, but board requires it')
+        nonce = data.split()[1]
+        authentication = _format_authentication(password, nonce)
+        stream.sendto(authentication.encode(), remote)
+        stream.settimeout(5)
+        try:
+            data = stream.recv(32).decode()
+        except socket.timeout as exc:
+            stream.close()
+            raise OTAError('authentication timeout') from exc
+        if data != "OK":
+            stream.close()
+            raise OTAError('authentication failed')
+    else:
+        stream.close()
+        raise OTAError(f'bad answer: {data}')
 
-  finally:
-    connection.close()
-    f.close()
+async def invite(
+        remote: Address,
+        local_port: int,
+        file: ImageFile,
+        password: str = None,
+        attempts: int = 5,
+        loop: asyncio.AbstractEventLoop = None) -> None:
+    """Invites ArduinoOTA client to port"""
+    if loop is None:
+        loop = asyncio.get_event_loop()
+    for i in range(attempts):
+        try:
+            await loop.run_in_executor(None, _try_invite, remote, local_port, file, password)
+            return
+        except OTAError as exc:
+            if i == attempts - 1:
+                raise exc
+    raise OTAError("failed to invite")
 
-  sock.close()
-  return 1
-# end serve
+def _random_port() -> int:
+    return random.randint(500, 32766)
 
+async def update_ota(
+        remote: Address,
+        server: Address,
+        file: ImageFile,
+        report: Callable[[float], None],
+        password: str = None,
+        client_timeout: float = 3) -> None:
+    """Updates ArduinoOTA client firmware"""
+    update_done = asyncio.Event()
+    client_connected = asyncio.Event()
+    async def handle_connection(reader, writer):
+        report(0)
+        client_connected.set()
+        while not file.end_of_file:
+            chunk = file.next_chunk()
+            writer.write(chunk)
+            try:
+                async with asyncio.timeout(5):
+                    resp = await reader.read(32)
+            except asyncio.TimeoutError as exc:
 
-def parser(unparsed_args):
-  parser = optparse.OptionParser(
-    usage = "%prog [options]",
-    description = "Transmit image over the air to the esp8266 module with OTA support."
-  )
+                raise OTAError("timeout on chunk write") from exc
+            if len(resp) == 0:
+                raise OTAError("no response on chunk write")
+            written = int(resp.decode("utf-8"))
+            if written < len(chunk):
+                raise OTAError(f"chunk write failed. Length mismatch: {written} < {len(chunk)}")
+            report(file.offset / file.size)
 
-  # destination ip and port
-  group = optparse.OptionGroup(parser, "Destination")
-  group.add_option("-i", "--ip",
-    dest = "esp_ip",
-    action = "store",
-    help = "ESP8266 IP Address.",
-    default = False
-  )
-  group.add_option("-I", "--host_ip",
-    dest = "host_ip",
-    action = "store",
-    help = "Host IP Address.",
-    default = "0.0.0.0"
-  )
-  group.add_option("-p", "--port",
-    dest = "esp_port",
-    type = "int",
-    help = "ESP8266 ota Port. Default 8266",
-    default = 8266
-  )
-  group.add_option("-P", "--host_port",
-    dest = "host_port",
-    type = "int",
-    help = "Host server ota Port. Default random 10000-60000",
-    default = random.randint(10000,60000)
-  )
-  parser.add_option_group(group)
+        try:
+            async with asyncio.timeout(5):
+                resp = await reader.read(32)
+        except asyncio.TimeoutError as exc:
+            raise OTAError("final status is not received") from exc
+        status = resp.decode("utf-8")
+        if status.find("E") >= 0:
+            raise OTAError("board failed to update firmware")
+        elif status.find("O") >= 0:
+            update_done.set()
 
-  # auth
-  group = optparse.OptionGroup(parser, "Authentication")
-  group.add_option("-a", "--auth",
-    dest = "auth",
-    help = "Set authentication password.",
-    action = "store",
-    default = ""
-  )
-  parser.add_option_group(group)
+    server_host, server_port = server
+    server = await asyncio.start_server(handle_connection, server_host, server_port)
+    # await invite(remote, server_port, file, password)
+    try:
+        async with asyncio.timeout(client_timeout):
+            await client_connected.wait()
+    except asyncio.TimeoutError as exc:
+        raise OTAError("client connection timeout") from exc
+    await update_done.wait()
+    server.close()
 
-  # image
-  group = optparse.OptionGroup(parser, "Image")
-  group.add_option("-f", "--file",
-    dest = "image",
-    help = "Image file.",
-    metavar="FILE",
-    default = None
-  )
-  group.add_option("-s", "--spiffs",
-    dest = "spiffs",
-    action = "store_true",
-    help = "Use this option to transmit a SPIFFS image and do not flash the module.",
-    default = False
-  )
-  parser.add_option_group(group)
+def _parse_args(args: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    # Connection
+    parser.add_argument("-i", "--ip",
+        help="ArduinoOTA client IP address",
+        type=str,
+        dest="client_ip",
+        metavar="",
+        required=True)
+    parser.add_argument("-p", "--port",
+        help="ArduinoOTA client port. Default: 2040",
+        type=int,
+        dest="client_port",
+        metavar="",
+        default=2040)
+    parser.add_argument("-I", "--host_ip",
+        help="Host IP address",
+        type=str,
+        metavar="",
+        default="0.0.0.0")
+    parser.add_argument("-P", "--host_port",
+        help="Host port. Default: random",
+        metavar="",
+        type=int,
+        default=None)
+    # Authentication
+    parser.add_argument("-a", "--auth",
+        help="Authentication password",
+        metavar="",
+        type=str,
+        default=None)
+    # Image
+    parser.add_argument("-f", "--file",
+        help="Image file",
+        type=str,
+        metavar="",
+        default=None
+    )
+    parser.add_argument("-s", "--spiffs",
+        help="Update only SPIFFS image and do not flash the module",
+        type=str,
+        metavar="",
+        default=None
+    )
 
-  # output group
-  group = optparse.OptionGroup(parser, "Output")
-  group.add_option("-d", "--debug",
-    dest = "debug",
-    help = "Show debug output. And override loglevel with debug.",
-    action = "store_true",
-    default = False
-  )
-  group.add_option("-r", "--progress",
-    dest = "progress",
-    help = "Show progress output. Does not work for ArduinoIDE",
-    action = "store_true",
-    default = False
-  )
-  parser.add_option_group(group)
+    return parser.parse_args(args)
 
-  (options, args) = parser.parse_args(unparsed_args)
+def _die(message: str) -> None:
+    sys.stderr.write(message + "\n")
+    sys.exit(1)
 
-  return options
-# end parser
+async def main(argv: list[str]) -> None:
+    """Entrypoint"""
+    if len(argv) < 2:
+        _die("Not enough arguments. Try --help")
+    args = _parse_args(argv[1:])
+    if args.host_port is None:
+        args.host_port = _random_port()
+    client = (args.client_ip, args.client_port)
+    host = (args.host_ip, args.host_port)
 
+    if args.spiffs is None and args.file is None:
+        _die("Please specify either --spiffs or --file")
+    if args.spiffs is not None:
+        file_path = args.spiffs
+        image_type = ImageType.SPIFFS
+    else:
+        file_path = args.file
+        image_type = ImageType.FLASH
 
-def main(args):
-  # get options
-  options = parser(args)
+    try:
+        with open(file_path, 'rb') as file:
+            image = ImageFile(image_type, file.read())
+    except OSError as exc:
+        _die(f"Failed to open file {file_path}: {exc}")
 
-  # adapt log level
-  loglevel = logging.WARNING
-  if (options.debug):
-    loglevel = logging.DEBUG
-  # end if
-
-  # logging
-  logging.basicConfig(level = loglevel, format = '%(asctime)-8s [%(levelname)s]: %(message)s', datefmt = '%H:%M:%S')
-
-  logging.debug("Options: %s", str(options))
-
-  # check options
-  global PROGRESS
-  PROGRESS = options.progress
-  if (not options.esp_ip or not options.image):
-    logging.critical("Not enough arguments.")
-
-    return 1
-  # end if
-
-  command = FLASH
-  if (options.spiffs):
-    command = SPIFFS
-  # end if
-  
-  res = 1
-
-  while res != 0:
-    options.host_port = random.randint(10000,60000)
-    res = serve(options.esp_ip, options.host_ip, options.esp_port, options.host_port, options.auth, options.image, command)
-  return res
-# end main
+    progress_bar = Progress("Uploading", bar_width=60)
+    def report(progress: float) -> None:
+        if progress == 1.0:
+            progress_bar.finish("Upload completed")
+            print("Waiting for board to confirm...")
+        else:
+            progress_bar.update(progress)
+    
+    print("Inviting board...")
+    try:
+        await invite(client, host[1], image, args.auth)
+    except OTAError as exc:
+        _die(f"Failed to invite board: {exc}")
+    print("Updating image...")
+    progress_bar.start()
+    try:
+        await update_ota(client, host, image, report)
+    except OTAError as exc:
+        _die(f"Failed to update image: {exc}")
+    print("Success!")
 
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv))
+    try:
+        asyncio.run(main(sys.argv))
+    except KeyboardInterrupt:
+        pass
+    except OTAError as exc:
+        print(exc)
 # end if
