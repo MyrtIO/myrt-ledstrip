@@ -22,7 +22,8 @@ void LightPlatform::setup() {
 		.insert(&StaticFx)
 		.insert(&RainbowFx)
 		.insert(&LoadingFx)
-		.insert(&FillFx);
+		.insert(&FillFx)
+        .insert(&FireFx);
 
 	lightLog.print("setup LEDs");
 	this->setColorTemperature(params_.temperatureInitial);

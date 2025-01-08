@@ -2,14 +2,14 @@
 #include "controllers/controllers.h"
 #include "platforms/platforms.h"
 
-io::Device strip("LEDStrip");
+io::Device lightDevice("MyrtLight");
 
 void setup() {
 	// Enable MQTT logging
 	auto mqttController = IO_INJECT_INSTANCE(MQTTController);
 	io::Logger::setOutput(mqttController->logStream());
 
-	strip.setup()
+	lightDevice.setup()
 		// Add platforms
 		.registerPlatform(IO_INJECT_UNIT(IWiFiPlatform))
 		.registerPlatform(IO_INJECT_UNIT(ILightPlatform))
@@ -18,9 +18,9 @@ void setup() {
 		.registerController(IO_INJECT_UNIT(BootController))
 		.registerController(IO_INJECT_UNIT(MQTTController));
 
-	strip.log().print("initialized");
+	lightDevice.log().print("initialized");
 }
 
 void loop() {
-	strip.loop();
+	lightDevice.loop();
 }

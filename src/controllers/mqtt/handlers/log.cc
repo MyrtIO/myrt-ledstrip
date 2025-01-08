@@ -1,7 +1,8 @@
 #include <PubSubServer.h>
+#include <config.h>
 #include "topics.h"
 
-const char* kLogTopic = MQTT_TOPICS_PREFIX "/log";
+const char* kLogTopic = CONFIG_MQTT_NAMESPACE "/log";
 const size_t kLogReportInterval = 50;
 
 Stream* logStream;

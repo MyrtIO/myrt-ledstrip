@@ -1,21 +1,21 @@
-#include "loading_effect.h"
+#include "waves_effect.h"
 #include <LightComposer/math/scale.h>
 
 const size_t kLoadingCycleDuration = 1000;
 const scale_t kLoadingFillFract = 200;
 
-const char* LoadingEffect::getName() {
+const char* WavesEffect::getName() {
 	return "loading";
 }
 
-void LoadingEffect::onActivate(LoadingEffectState& state, IPixels& pixels) {
+void WavesEffect::onActivate(WavesEffectState& state, IPixels& pixels) {
 	isReverse_ = false;
 	progress_.start(kLoadingCycleDuration);
 	fillSize_ = scale8(pixels.count() - 1, kLoadingFillFract);
 	maxOffset_ = pixels.count() - 1 - fillSize_;
 }
 
-bool LoadingEffect::handleFrame(LoadingEffectState& state, IPixels& pixels) {
+bool WavesEffect::handleFrame(WavesEffectState& state, IPixels& pixels) {
 	uint8_t shift = scale8(maxOffset_, progress_.get());
 	if (state.currentColor != state.targetColor) {
 		state.currentColor = state.targetColor;
@@ -34,9 +34,9 @@ bool LoadingEffect::handleFrame(LoadingEffectState& state, IPixels& pixels) {
 	return true;
 }
 
-void LoadingEffect::onColorUpdate(LoadingEffectState& state) {
+void WavesEffect::onColorUpdate(WavesEffectState& state) {
 	state.currentColor = state.targetColor;
 	progress_.start(state.transitionMs);
 }
 
-LoadingEffect LoadingFx;
+WavesEffect WavesFx;

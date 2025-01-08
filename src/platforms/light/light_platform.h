@@ -8,7 +8,7 @@
 #include <LightComposer/color/white_color.h>
 #include <config.h>
 #include "i_light_platform.h"
-#include "ws2812_hal.h"
+#include "fasthal.h"
 
 struct LightPlatformParams {
 	uint8_t ledCount;
@@ -48,7 +48,7 @@ class LightPlatform : public io::Unit, public ILightPlatform {
 	void setFPS(uint8_t fps);
 
   private:
-	WS2812HAL hal_;
+	FastHAL hal_;
 	BrightnessRenderer brightness_;
 	PixelsRenderer<void> pixels_;
 	LightComposer<void> composer_;

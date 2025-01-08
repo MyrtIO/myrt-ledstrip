@@ -3,9 +3,9 @@
 #include <LightComposer/i_light_hal.h>
 #include <config.h>
 
-class WS2812HAL : public ILightHAL {
+class FastHAL : public ILightHAL {
 public:
-	WS2812HAL() {};
+	FastHAL() {};
 
 	void setup(const RGBColor correction);
 	uint16_t count();

@@ -8,7 +8,7 @@ IO_CREATE_INSTANCE_OF(
 		.ssid = CONFIG_WIFI_SSID,
 		.password = CONFIG_WIFI_PASSWORD,
 		.hostname = CONFIG_DEVICE_NAME,
-		.startDelayMs = CONFIG_WIFI_START_DELAY
+		.startDelayMs = CONFIG_WIFI_START_DELAY,
 	}
 );
 
